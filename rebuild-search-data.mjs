@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
 import { Repository, Goods, Recipe } from "./src/repository.js";
+import { writeWorkerData } from "./build-worker-data.mjs";
 
 const mode = process.argv[2] || "normal";
 const raw = zlib.gunzipSync(fs.readFileSync(`data-${mode}/data.bin`));
@@ -163,35 +164,10 @@ const items = old.i.map(x => {
 
 const out = { i: items, a: old.a, recipes, uses };
 fs.writeFileSync(`/tmp/rebuilt-${mode}.json`, JSON.stringify(out));
-fs.writeFileSync(`search-data/${mode}.json.gz`, zlib.gzipSync(JSON.stringify(out), { level: 9 }));
 
-// --- shards for the Cloudflare worker fallback: r = mod 256, u = mod 2048 ---
-const shardOf = (id, m, pad) => String([...id].reduce((a, c) => a + c.charCodeAt(0), 0) % m).padStart(pad, "0");
-const rShards = {}, uShards = {};
-for (const [id, list] of Object.entries(recipes)) {
-    const s = shardOf(id, 256, 3);
-    (rShards[s] ??= {})[id] = list;
-}
-for (const [id, list] of Object.entries(uses)) {
-    const s = shardOf(id, 2048, 4);
-    (uShards[s] ??= {})[id] = list;
-}
-let nFiles = 0;
-const writeShards = (dir, shards) => {
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.mkdirSync(dir, { recursive: true });
-    for (const [name, map] of Object.entries(shards)) {
-        const body = JSON.stringify(map);
-        fs.writeFileSync(`${dir}/${name}.txt`, body);
-        fs.writeFileSync(`${dir}/${name}.json`, body);
-        nFiles++;
-    }
-};
-writeShards(`api/t/${mode}/r`, rShards);
-writeShards(`api/t/${mode}/u`, uShards);
-
-// worker item index {i, a}
-fs.writeFileSync(`api/worker/index-${mode}.json`, JSON.stringify({ i: items, a: old.a }));
+// cleans the data, writes search-data/<mode>.json.gz and the worker files
+const { recipeFiles, useFiles } = writeWorkerData(mode, out);
+const nFiles = recipeFiles + useFiles;
 
 const oldRC = Object.values(old.recipes).reduce((a, b) => a + b.length, 0);
 const oldUC = Object.values(old.uses).reduce((a, b) => a + b.length, 0);

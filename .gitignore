@@ -3,3 +3,4 @@ push-all.sh
 .DS_Store
 search-data/*.orig.json.gz
 node_modules/
+dist/
