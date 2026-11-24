@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 
+import { buildDepths, rankRecipes } from "./ranking.js";
+
 const MACHINE_ALIASES = {
     EBF: "blast furnace", LCR: "large chemical reactor", CR: "chemical reactor",
     DT: "distillation tower", ABS: "alloy blast smelting", VF: "vacuum freezer",
@@ -21,7 +23,7 @@ const MACHINE_ALIASES = {
     IMPLO: "implosion compressor", COMPRESSOR: "compressor", LATHE: "lathe",
     AUTOCLAVE: "autoclave", SOLIDIFIER: "fluid solidifier", SCANNER: "scanner",
     ASSEMBLY: "assembly line", COKE: "coke oven", PBF: "primitive blast furnace",
-    SAG: "sag mill", SAGMILL: "sag mill", ALLOY: "alloy smelter",
+    ALLOY: "alloy smelter",
     SMELTER: "alloy smelter", SOUL: "soul binder", SLICE: "slice and splice",
     DRACONIC: "draconic fusion", DEFUSION: "draconic fusion", XU2: "resonator",
 };
@@ -37,18 +39,11 @@ const KNOWN_TYPES = [
     "metal bender", "mixer", "oil cracking unit", "ore washer", "packager",
     "precision laser engraver", "primitive blast furnace", "pulverization",
     "pyrolyse oven", "rock breaker", "scanner", "sifter", "thermal centrifuge",
-    "vacuum freezer", "wiremill", "alloy smelter", "sag mill",
+    "vacuum freezer", "wiremill", "alloy smelter",
     "slice and splice", "soul binder", "vat", "draconic fusion", "resonator",
     "basic crafting", "advanced crafting", "elite crafting", "ultimate crafting",
     "ender crafting", "combination crafting", "compression crafting", "casting",
 ];
-
-// recipe types hidden from tag results by default — ore-doubling, packing
-// and other basic processing steps bury the interesting recipes. Explicitly
-// naming the machine ("rp ore dust macerator") still shows them.
-const HIDDEN_TYPES = new Set([
-    "pulverization", "extractor", "arc furnace", "packager", "compressor", "fluid solidifier",
-]);
 
 // "tier one" ↔ "tier 1": number words canonicalize to digits on both the
 // query and the item-name side, so "Steel Plated Micro Miner [Tier One]"
@@ -110,12 +105,29 @@ function bridgeMicroMiner(queryLower) {
     return map[tier] || MICRO_MINER_TIERS[tier] || null;
 }
 
+// machines whose recipes the index carries but the pack doesn't actually have
+const REMOVED_TYPES = new Set(["sag mill"]);
+
+const isRemoved = type => REMOVED_TYPES.has(String(type || "").toLowerCase());
+
+function removeMachines(index) {
+    for (const [id, list] of Object.entries(index.recipes)) index.recipes[id] = list.filter(r => !isRemoved(r.type));
+    for (const [id, list] of Object.entries(index.uses)) index.uses[id] = list.filter(u => !isRemoved(u.t));
+    for (const item of index.i) {
+        if (Array.isArray(item[6])) item[6] = item[6].filter(type => !isRemoved(type));
+        item[4] = index.recipes[item[0]]?.length ?? 0;
+        item[5] = index.uses[item[0]]?.length ?? 0;
+    }
+}
+
 const _modes = {};
 
 function getMode(mode) {
     if (!_modes[mode]) {
         const gz = fs.readFileSync(path.join(process.cwd(), "search-data", `${mode}.json.gz`));
         _modes[mode] = JSON.parse(zlib.gunzipSync(gz));
+        removeMachines(_modes[mode]);
+        _modes[mode].depth = buildDepths(_modes[mode]);
     }
     return _modes[mode];
 }
@@ -371,41 +383,23 @@ export default async function handler(req, res) {
         hasMachine: c.hasMachine,
     }));
 
-    let circMode = /circuit|workstation|mainframe|computer|processor|cpu/i.test(String(best[1] || ""));
-    const typePri = (t) => {
-        const s2 = (t || "").toLowerCase();
-        if (circMode) {
-            if (s2 === "circuit assembler") return 0;
-            if (s2 === "assembly line") return 1;
-            if (s2 === "blast furnace" || s2 === "electric blast furnace") return 2;
-            if (s2 === "large chemical reactor") return 3;
-            if (s2 === "mixer") return 4;
-            if (s2 === "alloy blast smelting") return 5;
-            if (s2.includes("craft")) return 6;
-            return 7;
-        }
-        if (s2 === "blast furnace" || s2 === "electric blast furnace") return 0;
-        if (s2 === "large chemical reactor") return 1;
-        if (s2 === "mixer") return 2;
-        if (s2 === "alloy blast smelting") return 3;
-        if (s2.includes("craft")) return 4;
-        return 5;
-    };
-
     let recipes = index.recipes[best[0]] || [];
     if (machineFilter && recipes.length) {
         const fUpper = machineFilter.toUpperCase();
         recipes = recipes.filter(r => r.type.toUpperCase().includes(fUpper));
     }
-    const wantsHidden = machineFilter && HIDDEN_TYPES.has(machineFilter);
-    if (!wantsHidden && recipes.length)
-        recipes = recipes.filter(r => !HIDDEN_TYPES.has(r.type.toLowerCase()));
-    if (recipes.length > 1)
-        recipes = [...recipes].sort((a, b) => typePri(a.type) - typePri(b.type));
+    const findHotRecipe = hotName => {
+        const hot = items.find(i => i[1] === hotName);
+        if (!hot) return [];
 
-    let uses = wantsUses ? (index.uses[best[0]] || []) : [];
-    if (!wantsHidden && uses.length)
-        uses = uses.filter(e => !HIDDEN_TYPES.has(String(e.t || "").toLowerCase()));
+        const blast = (index.recipes[hot[0]] || []).filter(r => r.type.toLowerCase() === "blast furnace");
+        return rankRecipes(blast, hotName, index.depth, new Set(), () => [])
+            .map(entry => ({ ...entry, role: "hot", itemId: hot[0], itemName: hot[1] }));
+    };
+    const madeFromItem = new Set((index.uses[best[0]] || []).map(use => String(use.n).replace(/<[^>]*>/g, "")));
+    recipes = rankRecipes(recipes, best[1], index.depth, madeFromItem, findHotRecipe);
+
+    const uses = wantsUses ? (index.uses[best[0]] || []) : [];
 
     return send({
         item: {

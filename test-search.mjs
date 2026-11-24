@@ -1,7 +1,7 @@
 // Local test harness for api/search.js — run from nomicodex-deploy/
 import handler from "./api/search.js";
 
-const hidden = new Set(["pulverization", "extractor", "arc furnace", "packager", "compressor", "fluid solidifier"]);
+const basic = new Set(["pulverization", "extractor", "arc furnace", "packager", "compressor", "fluid solidifier"]);
 
 async function call(q, mode = "normal", uses = false) {
     return new Promise((resolve) => {
@@ -98,12 +98,39 @@ for (const q of ["steel ingot", "pbi", "iridium ore ebf", "fusion reactor", "hig
     check(`expert mode micro miner tier 1`, r2.body.item?.name?.includes("Tier One"), `got ${r2.body.item?.name}`);
 }
 
-// --- hidden types ---
+// --- ranking: production first, basic processing last and collapsed per machine ---
 {
     const r = await call("steel ingot");
-    const types = (r.body.recipes || []).map(x => x.type);
-    check(`steel ingot recipes hide all basic processing types`,
-        types.every(t => !hidden.has(t.toLowerCase())), types.join(", "));
+    const recipes = r.body.recipes || [];
+    const firstBasic = recipes.findIndex(x => basic.has(x.type.toLowerCase())),
+        lastMake = recipes.map(x => x.role).lastIndexOf("make");
+    check(`steel ingot lists production before basic processing`,
+        firstBasic > lastMake && recipes[0].role === "make",
+        recipes.map(x => `${x.type}:${x.role}`).join(", ").slice(0, 200));
+    const arc = recipes.filter(x => x.type === "Arc Furnace");
+    check(`steel ingot arc furnace recycling collapses into one line`,
+        arc.length === 1 && arc[0].role === "recycle" && arc[0].variants.length > 10, `got ${arc.length} lines`);
+}
+{
+    const r = await call("titanium ingot");
+    const recipes = r.body.recipes || [];
+    check(`titanium ingot lists the hot ingot's blast furnace recipes first`,
+        recipes[0]?.role === "hot" && recipes[0]?.type === "Blast Furnace" && recipes[0]?.itemName === "Hot Titanium Ingot",
+        recipes.slice(0, 3).map(x => `${x.type}:${x.role}`).join(", "));
+    const cool = recipes.findIndex(x => x.role === "cool");
+    check(`titanium ingot cooling step follows the blast recipes`,
+        cool > 0 && recipes.slice(0, cool).every(x => x.role === "hot"), `cool at ${cool}`);
+}
+{
+    const r = await call("sulfuric acid");
+    check(`sulfuric acid ranks the sulfur + water LCR first`,
+        r.body.recipes?.[0]?.type === "Large Chemical Reactor" && /^Sulfur Dust/.test(r.body.recipes[0].ins),
+        `${r.body.recipes?.[0]?.type}: ${r.body.recipes?.[0]?.ins}`);
+}
+{
+    const r = await call("signalum dust", "normal", true);
+    const all = [...(r.body.recipes || []).map(x => x.type), ...(r.body.uses || []).map(x => x.t)];
+    check(`sag mill recipes are removed`, all.every(t => String(t).toLowerCase() !== "sag mill"), [...new Set(all)].join(", "));
 }
 {
     // tier labels derive from the recipe voltage, not the pack's broken
@@ -123,28 +150,27 @@ for (const q of ["steel ingot", "pbi", "iridium ore ebf", "fusion reactor", "hig
     // the salt-variant LCR/CR lines the old data build deduplicated away
     const r = await call("sodium bisulfate");
     const ins = (r.body.recipes || []).map(x => x.ins);
-    check(`sodium bisulfate keeps the Salt + HCl variants`,
-        ins.filter(i => i.startsWith("Salt (2)")).length === 2, ins.join(" | ").slice(0, 150));
-    check(`sodium bisulfate visible recipes = 6 (8 minus 2 packagers)`,
-        (r.body.recipes || []).length === 6, `got ${(r.body.recipes || []).length}`);
+    const salt = (r.body.recipes || []).filter(x => x.ins.startsWith("Salt (2)"));
+    check(`sodium bisulfate keeps the Salt + HCl recipe with its Chemical Reactor copy merged in`,
+        salt.length === 1 && salt[0].variants.some(v => v.type === "Chemical Reactor"), ins.join(" | ").slice(0, 150));
+    check(`sodium bisulfate shows 2 production lines then 2 merged reshaping lines`,
+        (r.body.recipes || []).map(x => x.role).join(",") === "make,make,reshape,reshape",
+        (r.body.recipes || []).map(x => x.role).join(","));
 }
 {
-    // an ore dust whose primary step IS the macerator — must still resolve,
-    // just without the hidden types
+    // an ore dust whose primary step is the macerator must still resolve
     const r = await call("iron ore dust");
-    const types = (r.body.recipes || []).map(x => x.type);
     check(`iron ore dust resolves`, !!r.body.item, JSON.stringify(r.body).slice(0, 100));
-    check(`iron ore dust hides pulverization`, types.every(t => t.toLowerCase() !== "pulverization"), types.join(", "));
 }
 {
     const r = await call("steel ingot", "normal", true);
     const types = (r.body.uses || []).map(x => x.t);
-    check(`steel ingot uses hide extractor/pulverization`,
-        types.every(t => !hidden.has(String(t).toLowerCase())),
+    check(`steel ingot uses include basic processing again`,
+        types.some(t => basic.has(String(t).toLowerCase())),
         [...new Set(types)].slice(0, 8).join(", "));
 }
 {
-    // explicit machine requests still show the new hidden types
+    // explicit machine requests filter to basic processing machines
     const rA = await call("steel ingot arc");
     const tA = (rA.body.recipes || []).map(x => x.type);
     check(`arc filter returns arc furnace`,
@@ -162,7 +188,7 @@ for (const q of ["steel ingot", "pbi", "iridium ore ebf", "fusion reactor", "hig
         `filter=${rC.body.machineFilter}`);
 }
 {
-    // explicit machine request still shows the hidden types
+    // explicit machine request filters to the macerator
     const r = await call("iron ore dust macerator");
     const types = (r.body.recipes || []).map(x => x.type);
     check(`macerator filter returns pulverization`,
