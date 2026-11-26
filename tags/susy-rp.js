@@ -5,8 +5,8 @@ const VERSION = "GregTechCodex";
 const PACK = "SuperSymmetry 0.2.0.4";
 const COLOR = 0xa78bfa;
 
-const ORIGIN = "https://nomi-codex.vercel.app";
-const SEARCH_URLS = [ORIGIN + "/api/susy/search"];
+const ORIGIN = "https://gregtechcodex.vercel.app";
+const SEARCH_URL = ORIGIN + "/api/susy/search";
 const SHOT_URL = ORIGIN + "/api/susy/shot";
 const SITE_URL = ORIGIN + "/?pack=susy";
 
@@ -84,6 +84,9 @@ function navMarker(query, kind, n) {
 }
 
 function reply(embed) {
+    if (embed.description?.length > MAX_DESCRIPTION) {
+        embed.description = embed.description.slice(0, MAX_DESCRIPTION - 1) + "…";
+    }
     msg.reply({ embed: { color: COLOR, ...embed } });
 }
 
@@ -150,13 +153,11 @@ function getJson(url, timeout) {
 function search(query, mode, uses) {
     const params = `?q=${encodeURIComponent(query)}&mode=${mode}${uses ? "&uses=1" : ""}`;
 
-    for (const url of SEARCH_URLS) {
-        try {
-            return getJson(url + params, SEARCH_TIMEOUT);
-        } catch {}
+    try {
+        return getJson(SEARCH_URL + params, SEARCH_TIMEOUT);
+    } catch {
+        return null;
     }
-
-    return null;
 }
 
 function renderCard(itemId, mode, recipeNum, extra) {
@@ -231,7 +232,7 @@ function showList(item, recipes, args, raw, data) {
 
     reply({
         title: plain(item.name) + (data.machineFilter ? ` (${data.machineFilter})` : ""),
-        description: description.slice(0, MAX_DESCRIPTION),
+        description,
         footer: footer(args.mode, navMarker(base, "p", page))
     });
 }
@@ -315,8 +316,12 @@ function findLastMarker() {
     } catch {}
 
     for (const message of msgs ?? []) {
-        const marker = NAV_MARKER_REGEX.exec(JSON.stringify(message.embeds ?? []));
-        if (marker) return { query: marker[1], kind: marker[2], n: parseInt(marker[3], 10) };
+        for (const embed of message.embeds ?? []) {
+            const text = embed.footer?.text;
+            if (!text?.startsWith(PACK + " • ")) continue;
+            const marker = NAV_MARKER_REGEX.exec(text);
+            if (marker) return { query: marker[1], kind: marker[2], n: parseInt(marker[3], 10) };
+        }
     }
 
     return null;
