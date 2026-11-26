@@ -1,7 +1,7 @@
 const charCodeItem = "i".charCodeAt(0);
 const charCodeFluid = "f".charCodeAt(0);
 const charCodeRecipe = "r".charCodeAt(0);
-const DATA_VERSION = 7;
+export const DATA_VERSION = 8;
 export class Repository {
     constructor(data) {
         this.objects = {};
@@ -10,9 +10,9 @@ export class Repository {
         this.elements = new Int32Array(data);
         this.view = new DataView(data);
         this.textReader = new TextDecoder();
-        let dataVersion = this.elements[0];
-        if (dataVersion != DATA_VERSION)
-            throw new Error(`Unsupported data version: ${dataVersion} (Required: ${DATA_VERSION}). This may be caused by the browser cache. Please try reloading using F5 or Ctrl+F5.`);
+        this.version = this.elements[0];
+        if (this.version !== 7 && this.version !== DATA_VERSION)
+            throw new Error(`Unsupported data version: ${this.version}. Reload the page to update the recipe reader.`);
         this.items = this.GetSlice(this.elements[1]);
         this.fluids = this.GetSlice(this.elements[2]);
         this.oreDicts = this.GetSlice(this.elements[3]);
@@ -206,6 +206,7 @@ export class OreDict extends RecipeObject {
         super(repository, offset);
         this.items = this.GetArray(5, Item);
     }
+    get name() { return this.repository.version >= 8 ? this.GetString(6) : null; }
     MatchSearchText(query) {
         var items = this.items;
         for (var i = 0; i < items.length; i++) {
@@ -224,6 +225,7 @@ export class RecipeType extends MemMappedObject {
         this.multiblocks = this.GetArray(3, Item);
     }
     get name() { return this.GetString(0); }
+    get sourceName() { return this.repository.version >= 8 ? this.GetString(7) : this.name; }
     get category() { return this.GetString(1); }
     get dimensions() { return this.GetSlice(2); }
     get shapeless() { return this.GetInt(4) === 1; }
@@ -275,13 +277,18 @@ export class Recipe extends SearchableObject {
         for (var i = 0; i < elements; i++) {
             var type = slice[index++];
             var ptr = slice[index++];
+            const slot = slice[index++];
+            const amount = slice[index++];
             result[i] = {
                 type: type,
                 goodsPtr: ptr,
                 goods: this.repository.GetObject(ptr, RecipeIoTypePrototypes[type]),
-                slot: slice[index++],
-                amount: slice[index++],
-                probability: slice[index++] / 100,
+                slot,
+                // Version 8 keeps inline integers and uses a negative pointer to an out-of-line double.
+                amount: this.repository.version >= 8 && amount < 0
+                    ? this.repository.view.getFloat64(-4 * amount, true)
+                    : amount,
+                probability: slice[index++] / (this.repository.version >= 8 ? 10_000 : 100),
             };
         }
         return result;

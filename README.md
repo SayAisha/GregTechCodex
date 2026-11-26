@@ -19,7 +19,7 @@ An unofficial recipe browser for [NomiFactory CEu](https://github.com/Nomi-CEu/N
 | NomiFactory CEu | `/api/nomi/search?q=steel%20ingot` | `/api/nomi/shot` |
 | SuperSymmetry | `/api/susy/search?q=steel%20ingot` | `/api/susy/shot` |
 
-The existing Nomi routes at `https://nomi-codex.vercel.app/api/search` and `https://nomi-codex.vercel.app/api/shot` are available for existing integrations. Use `uses=1` for recipes that consume an item. The card renderer accepts the item ID, a one-based recipe number `r`, and `format=json` for a link to the card.
+The existing Nomi routes at `https://nomi-codex.vercel.app/api/search` and `https://nomi-codex.vercel.app/api/shot` are available for existing integrations. Use `uses=1` for recipes that use an item as an input. The card renderer accepts the item ID, a one-based recipe number `r`, and `format=json` for a link to the card.
 
 For an El Levert JavaScript tag named `rp` on a SuperSymmetry server, use [tags/susy-rp.js](tags/susy-rp.js).
 
@@ -28,12 +28,12 @@ For an El Levert JavaScript tag named `rp` on a SuperSymmetry server, use [tags/
 Use the [SuSy Factory Flow dataset pipeline](https://github.com/SymmetricDevs/susy-factory-flow) with the corresponding release, including the Oracle's rendered icon export. Import the normalized `recipes.json` after texture enrichment, then rebuild the search index.
 
 ```sh
-node import-susy.mjs /path/to/recipes.json /path/to/textures/rendered /path/to/recipedump.json
+node import-susy.mjs /path/to/recipes.json /path/to/textures/rendered /path/to/recipedump.json /path/to/pack/.minecraft
 node rebuild-search-data.mjs susy
 npm test
 ```
 
-The importer keeps item variants, ingredient alternatives, recipe links, and rendered icons in the shared browser format. It reads the crafting grid from `recipedump.json` so repeated ingredients and empty slots stay in place. It reports any recipes it can't represent. Search and cards use the same imported dataset.
+Use the same pack instance that produced the export. The importer reads the pack's English translations from its language files and mod JARs using `unzip`. It uses registered machine icons, expands wildcard ingredients to the exported variants, and reads the crafting grid from `recipedump.json`. Crop Farm cards label fractional harvests as averages per plant. Search and cards share the same imported data.
 
 ## Credits
 

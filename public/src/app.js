@@ -1,6 +1,6 @@
 // GregTechCodex reads pack datasets from the binary
 // repository (repository.js) and the atlas; no classic-UI code involved.
-import { Repository, Item, Fluid, OreDict, Recipe } from "./repository.js?v=22";
+import { Repository, Item, Fluid, OreDict, Recipe } from "./repository.js?v=23";
 import { tierIndexOf } from "./utils.js?v=23";
 import { OpenOceu } from "./oceu.js?v=21";
 
@@ -11,7 +11,7 @@ const TIERS = ["ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV",
 let ATLAS_COLS = 128;
 let ATLAS_UNIT = 64;
 const SHOT = new URLSearchParams(location.hash.split("?")[1] ?? "").get("shot") === "1";
-const DATA_V = 16, ATLAS_V = 7, ICON_V = 1;
+const DATA_V = 17, ATLAS_V = 7, ICON_V = 2;
 const PACK = new URLSearchParams(location.search).get("pack") === "susy" ? "susy" : "nomi";
 const SUSY = PACK === "susy";
 const PACK_DESCRIPTION = SUSY ? "SuperSymmetry 0.2.0.4" : "NomiFactory CEu 1.7.7 — normal &amp; expert";
@@ -73,7 +73,9 @@ const tt = (() => {
     const show = (target, goods) => {
         const b = ensure();
         const isOre = goods instanceof OreDict;
-        let title = isOre ? String(goods.id).replace(/^o:/, "") : (goods.name ?? goods.id);
+        const title = isOre
+            ? (goods.name ? esc(goods.name) : String(goods.id).replace(/^o:/, ""))
+            : (goods.name ?? goods.id);
         let variants = "";
         if (isOre) {
             variants = goods.items.slice(0, 8).map(v =>
@@ -247,8 +249,8 @@ function slotHtml(g, { ore = false, fluid = false, amount = 1, prob = 1 } = {}) 
     // non-consumable inputs carry no amount badge — programmed circuits
     // show their configuration on the texture itself
     let amt = amount != null && amount !== 0 && amount !== 1
-        ? `<span class="amt">${fmt(amount)}</span>` : "";
-    const p = prob < 1 ? `<span class="prob">${Math.round(prob * 100)}%</span>` : "";
+        ? `<span class="amt">${Number.isInteger(amount) ? fmt(amount) : amount}</span>` : "";
+    const p = prob < 1 ? `<span class="prob">${Math.round(prob * 10_000) / 100}%</span>` : "";
     return `<span class="sicon${ore ? " ore" : ""}" style="${iconStyle(iconId)}"
         data-gptr="${g.objectOffset}" ${ore ? 'data-ore="1"' : ""} ${fluid ? 'data-fluid="1"' : ""}>${amt}${p}</span>`;
 }
@@ -286,15 +288,17 @@ function metaChips(r) {
     const gt = r.gtRecipe;
     if (!gt) return "";
     const chips = [];
+    const duration = `<span class="mchip time"><b>${gt.durationSeconds}</b>s</span>`;
     if (gt.voltage > 0) {
         chips.push(`<span class="mchip tier"><b>${TIERS[tierIndexOf(gt.voltage)] ?? "?"}</b></span>`);
         chips.push(`<span class="mchip"><b>${fmt(gt.voltage)}</b> EU/t</span>`);
-        chips.push(`<span class="mchip time"><b>${gt.durationSeconds % 1 ? gt.durationSeconds.toFixed(1) : gt.durationSeconds}</b>s</span>`);
+        chips.push(duration);
         chips.push(`<span class="mchip">${fmt(gt.voltage * gt.amperage * gt.durationTicks)} EU</span>`);
         if (gt.amperage !== 1) chips.push(`<span class="mchip"><b>${gt.amperage}</b>A</span>`);
     } else if (gt.durationSeconds > 0) {
-        chips.push(`<span class="mchip time"><b>${gt.durationSeconds % 1 ? gt.durationSeconds.toFixed(1) : gt.durationSeconds}</b>s</span>`);
+        chips.push(duration);
     }
+    if (r.recipeType.category === "crop-farm") chips.push('<span class="mchip">Average yield per plant</span>');
     for (const m of gt.metadata) {
         const v = m.value;
         switch (m.key) {
@@ -333,12 +337,13 @@ function recipeCard(r) {
     const machineIcon = crafter ? `<span class="sicon" data-gptr="${crafter.objectOffset}" style="${iconStyle(crafter.iconId, 22)};width:22px;height:22px;margin:0"></span>` : "";
 
     const gt = r.gtRecipe;
-    const ocAttrs = gt ? `data-eu="${gt.voltage}" data-dur="${gt.durationTicks}" data-amp="${gt.amperage}"`
+    const canOverclock = gt?.voltage > 0;
+    const ocAttrs = canOverclock ? `data-eu="${gt.voltage}" data-dur="${gt.durationTicks}" data-amp="${gt.amperage}"`
         + (gt.MetadataByKey("coil_heat") ? ` data-heat="${gt.MetadataByKey("coil_heat")}"` : "") : "";
 
     return `<div class="rcard">
         <div class="rcard-head">${machineIcon}<span class="machine-name">${esc(t.name)}</span>
-            ${gt ? `<button class="oc-btn" title="Overclock this recipe" ${ocAttrs}>⚡</button>` : ""}</div>
+            ${canOverclock ? `<button class="oc-btn" title="Overclock this recipe" ${ocAttrs}>⚡</button>` : ""}</div>
         <div class="rcard-body">
             <div class="rcard-side">${left || ""}</div>
             <div class="rcard-arrow"></div>
@@ -466,8 +471,9 @@ function renderItem(id) {
     // screenshot mode: bare single card for the shot service
     if (state.shot) {
         const fltName = state.filter ? state.filter.toLowerCase() : null;
-        const flt = fltName && list.some(r => r.recipeType.name.toLowerCase() === fltName) ? fltName : null;
-        let lst = flt ? list.filter(r => r.recipeType.name.toLowerCase() === flt) : list;
+        const filter = fltName && (list.find(r => r.recipeType.sourceName.toLowerCase() === fltName)
+            ?? list.find(r => r.recipeType.name.toLowerCase() === fltName));
+        let lst = filter ? list.filter(r => r.recipeType.name === filter.recipeType.name) : list;
         // content-based selection (out/eu/dur): pins the exact card without
         // relying on list positions — external callers (the Discord tag) list
         // uses in their own order/filtering, which diverges from ours
@@ -678,6 +684,7 @@ async function boot() {
     // in one — dead entries (service items, empty placeholders) stay hidden
     for (const ptr of repo.items) {
         const it = repo.GetObject(ptr, Item);
+        if (SUSY && it.id.endsWith("@32767")) continue;
         if (it.production.length === 0 && it.consumption.length === 0)
             continue;
         INDEX.push({ ptr, id: it.id, plain: (it.name ?? it.id).replace(/<[^>]*>/g, "").toLowerCase(),

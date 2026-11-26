@@ -53,6 +53,7 @@ function describeRecipe(recipe) {
     if (recipe.heat) text += ` • ${recipe.heat}K`;
     if (recipe.clean) text += " • cleanroom";
     if (recipe.circuit != null) text += ` • circuit ${recipe.circuit}`;
+    if (recipe.averageYield) text += " • average yield per plant";
 
     return text + describeVariants(recipe);
 }
@@ -70,6 +71,7 @@ function describeUse(use) {
     if (use.e) text += ` • ${use.e} EU/t`;
     text += ` • ${seconds(use.d)}s`;
     if (use.circuit != null) text += ` • circuit ${use.circuit}`;
+    if (use.averageYield) text += " • average yield per plant";
     if (use.i) text += ` from **${plain(use.i)}**`;
 
     return text;

@@ -3,7 +3,8 @@
 // Usage: node rebuild-search-data.mjs <normal|expert|susy>
 import fs from "node:fs";
 import zlib from "node:zlib";
-import { Repository, Goods, Recipe } from "./src/repository.js";
+import { Repository, Goods, Recipe, RecipeType } from "./src/repository.js";
+import { wildcard } from "./lib/susy-resources.mjs";
 import { writeWorkerData } from "./build-worker-data.mjs";
 
 const mode = process.argv[2] || "normal";
@@ -30,30 +31,32 @@ function tierOf(voltage) {
         if (voltage <= TIER_MAX[i]) return TIERS[i];
     return TIERS[TIERS.length - 1];
 }
-const fmtN = n => n.toLocaleString("en-US");
+const fmtN = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 }).format;
+const ioName = io => io.goods.name ?? io.goods.items?.[0]?.name ?? io.goods.id;
 
 function ioSummary(r, kinds) {
     // aggregate identical inputs (crafting grids repeat the same item per
     // slot) and resolve oredicts to their first member's name — matches the
     // old data's formatting so static-card hashes carry over
-    const order = [], byKey = new Map();
+    const byKey = new Map(), planted = [];
     for (const io of r.items) {
         if (!kinds.includes(io.type)) continue;
-        if (io.type === 0 && (io.goods.name === "Programmed Circuit" || io.amount === 0)) continue;
+        if (io.type === 0 && (io.goods.name === "Programmed Circuit" || io.amount === 0)) {
+            if (r.recipeType.category === "crop-farm") planted.push(`${ioName(io)} (planted)`);
+            continue;
+        }
         const isFluid = io.type === 2 || io.type === 4;
-        const name = io.type === 1
-            ? (io.goods.items?.[0]?.name ?? io.goods.id)
-            : (io.goods.name ?? io.goods.id);
-        const key = name + (isFluid ? "\u0001" : "\u0000");
-        if (!byKey.has(key)) { byKey.set(key, 0); order.push(key); }
-        byKey.set(key, byKey.get(key) + io.amount);
+        const name = ioName(io);
+        const chance = mode === "susy" && io.type >= 3 ? io.probability : 1;
+        const key = JSON.stringify([name, isFluid, chance]);
+        if (!byKey.has(key)) byKey.set(key, { name, isFluid, chance, amount: 0 });
+        byKey.get(key).amount += io.amount;
     }
-    return order.map(k => ({
-        name: k.slice(0, -1),
-        fluid: k.endsWith("\u0001"),
-        amount: byKey.get(k)
-    })).map(({ name, fluid, amount }) =>
-        `${name} (${fmtN(amount)}${fluid ? "L" : ""})`).join(", ");
+    const amounts = [...byKey.values()].map(({ name, isFluid, amount, chance }) => {
+        const odds = chance < 1 ? `, ${fmtN(chance * 100)}% chance` : "";
+        return `${name} (${fmtN(amount)}${isFluid ? "L" : ""}${odds})`;
+    });
+    return [...planted, ...amounts].join(", ");
 }
 function firstOutputName(r) {
     for (const io of r.items) {
@@ -79,6 +82,7 @@ function recipeEntry(r, idx) {
         tier: gt ? tierOf(gt.voltage) : "ULV",
         heat, clean,
         ...(circuit === undefined ? {} : { circuit }),
+        ...(r.recipeType.category === "crop-farm" ? { averageYield: true } : {}),
         img: "",
         ins: ioSummary(r, [0, 1, 2]),
         outs: ioSummary(r, [3, 4]),
@@ -91,9 +95,7 @@ function ioNames(r, kinds) {
     for (const io of r.items) {
         if (!kinds.includes(io.type)) continue;
         if (io.type === 0 && (io.goods.name === "Programmed Circuit" || io.amount === 0)) continue;
-        const name = io.type === 1
-            ? (io.goods.items?.[0]?.name ?? io.goods.id)
-            : (io.goods.name ?? io.goods.id);
+        const name = ioName(io);
         if (!seen.has(name)) { seen.add(name); order.push(name); }
     }
     return order.join(", ");
@@ -102,15 +104,20 @@ function useEntry(r, goods, idx) {
     const e = recipeEntry(r, 0);
     // amount of `goods` consumed: direct input, or via an oredict containing it
     let amount = 0;
+    const family = goods.id.endsWith(wildcard) ? goods.id.slice(0, -wildcard.length) : null;
+    const matches = id => id === goods.id || (family !== null && (id === family || id.startsWith(family + "@")));
     for (const io of r.items) {
         if (io.type > 2) continue;
-        if (io.goods.id === goods.id) { amount = io.amount; break; }
-        if (io.type === 1 && io.goods.items?.some(it => it.id === goods.id)) { amount = io.amount; break; }
+        if (matches(io.goods.id) || (io.type === 1 && io.goods.items.some(it => matches(it.id)))) {
+            amount = io.amount;
+            break;
+        }
     }
     const entry = { n: firstOutputName(r), t: e.type, e: e.eu, d: e.dur, x: e.tier, h: e.heat, a: amount, i: e.ins, g: "" };
     if (mode === "susy") {
         entry.idx = idx;
         if (e.circuit !== undefined) entry.circuit = e.circuit;
+        if (e.averageYield) entry.averageYield = true;
     }
     entry.__key = JSON.stringify([entry.t, entry.e, entry.d, entry.n, ioNames(r, [0, 1, 2])]);
     return entry;
@@ -176,6 +183,14 @@ const items = (mode === "susy" ? goodsIndex : old.i).map(x => {
 const out = { i: items, a: old.a, recipes, uses };
 let nFiles = 0;
 if (mode === "susy") {
+    const machineAliases = {};
+    for (const ptr of repo.recipeTypes) {
+        const { name, sourceName } = repo.GetObject(ptr, RecipeType);
+        if (name !== sourceName) machineAliases[sourceName.toLowerCase()] = name.toLowerCase();
+    }
+    const erf = machineAliases["electric blast furnace"];
+    if (erf) Object.assign(machineAliases, { "blast furnace": erf, ebf: erf, erf });
+    out.machineAliases = machineAliases;
     fs.writeFileSync(`search-data/${mode}.json.gz`, zlib.gzipSync(JSON.stringify(out), { level: 9 }));
 } else {
     const { recipeFiles, useFiles } = writeWorkerData(mode, out);

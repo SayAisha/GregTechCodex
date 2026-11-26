@@ -3,10 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
-import { RecipeIoType as Io } from "./src/repository.js";
+import { DATA_VERSION, RecipeIoType as Io } from "./src/repository.js";
 import { tierIndexOf } from "./src/utils.js";
+import { readPackLocales, resolveMachineMaps } from "./lib/susy-machine-maps.mjs";
+import { goodsId, resolveIngredient, resolveResources } from "./lib/susy-resources.mjs";
 
-const version = 7;
 const searchBits = [-1, -1, -1, -1];
 const integerMax = 0x7fffffff;
 const emptySlot = 65535;
@@ -15,12 +16,17 @@ const cleanName = value => String(value).replace(/§[0-9a-fk-or]/gi, "").replace
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 })[char]);
 
-const goodsId = ({ kind, id }) => `${kind === "fluid" ? "f" : "i"}:${id}`;
 const supported = value => Number.isInteger(value) && value >= 0 && value <= integerMax;
+
+function doubleWords(value) {
+    const double = Buffer.alloc(8);
+    double.writeDoubleLE(value);
+    return [double.readInt32LE(0), double.readInt32LE(4)];
+}
 
 class BinaryDataset {
     constructor() {
-        this.words = [version, 0, 0, 0, 0, 0, 0, 0];
+        this.words = [DATA_VERSION, 0, 0, 0, 0, 0, 0, 0];
         this.strings = new Map();
         this.empty = this.list([]);
     }
@@ -50,9 +56,7 @@ class BinaryDataset {
     }
 
     metadata(key, value) {
-        const double = Buffer.alloc(8);
-        double.writeDoubleLE(value);
-        return this.add([this.string(key), double.readInt32LE(0), double.readInt32LE(4)]);
+        return this.add([this.string(key), ...doubleWords(value)]);
     }
 
     finish(collections) {
@@ -90,14 +94,14 @@ function restoreCraftingGrid(recipe, raw) {
     return { ...recipe, inputs, craftingSlots, craftingGrid: [width, shape.length] };
 }
 
-export function compileSusy(dataset, rawCrafting = []) {
+export function compileSusy(dataset, raw = {}, locale = new Map()) {
     const bin = new BinaryDataset();
     const goods = new Map();
-    const catalog = new Map(dataset.resources.map(resource => [goodsId(resource), resource]));
+    const { catalog, variants } = resolveResources(dataset.resources, raw.items ?? [], locale);
     const recipes = [], icons = [];
     const types = new Map(), groups = new Map();
-    const catalysts = new Map((dataset.recipeMapIcons ?? []).map(entry => [entry.recipeMap, entry.resource]));
-    const shaped = new Map(rawCrafting.filter(entry => entry.type === "shaped").map(entry => [entry.registryName, entry]));
+    const machineMaps = resolveMachineMaps(dataset, raw, locale);
+    const shaped = new Map((raw.crafting ?? []).filter(entry => entry.type === "shaped").map(entry => [entry.registryName, entry]));
 
     function addGoods(resource) {
         const id = goodsId(resource);
@@ -128,24 +132,26 @@ export function compileSusy(dataset, rawCrafting = []) {
         });
         const key = JSON.stringify([recipe.machineType, recipe.category, dimensions]);
         if (!types.has(key)) {
-            const machine = catalysts.get(recipe.machineType);
+            const { label, resource } = machineMaps.get(recipe.machineType);
+            const machine = resource && catalog.get(goodsId(resource));
             types.set(key, bin.add([
-                bin.string(recipe.machineType), bin.string(recipe.category ?? ""), bin.list(dimensions),
-                bin.empty, 0, bin.empty, machine ? addGoods(machine).ptr : -1
+                bin.string(label), bin.string(recipe.category ?? ""), bin.list(dimensions),
+                bin.empty, 0, bin.empty, machine?.iconPath ? addGoods(machine).ptr : -1,
+                bin.string(recipe.machineType)
             ]));
         }
         return types.get(key);
     }
 
-    function slotGroup(slot) {
-        const variants = slot.accepted ?? [];
-        if (slot.kind !== "item" || variants.length < 2) return null;
+    function slotGroup(slot, choices, displayName) {
+        if (slot.kind !== "item" || choices.length < 2) return null;
 
-        const key = JSON.stringify(variants.map(goodsId).sort());
+        const key = JSON.stringify([displayName, choices.map(goodsId).sort()]);
         if (!groups.has(key)) {
-            const members = variants.map(addGoods);
+            const members = choices.map(addGoods);
             const label = slot.groupId?.replace(/^oredict:/, "") ?? slot.id;
-            const ptr = bin.add([...searchBits, bin.string(`o:${label}:${groups.size}`), bin.list(members.map(item => item.ptr))]);
+            const ptr = bin.add([...searchBits, bin.string(`o:${label}:${groups.size}`),
+                bin.list(members.map(item => item.ptr)), displayName ? bin.string(displayName) : -1]);
             groups.set(key, { ptr, members });
         }
         return groups.get(key);
@@ -157,7 +163,7 @@ export function compileSusy(dataset, rawCrafting = []) {
         if (raw) recipe = restoreCraftingGrid(recipe, raw);
 
         if (!recipe || ![recipe.eut, recipe.durationTicks].every(supported) ||
-            [...recipe.inputs, ...recipe.outputs].some(slot => !supported(slot.amount))) {
+            [...recipe.inputs, ...recipe.outputs].some(slot => !Number.isFinite(slot.amount) || slot.amount < 0)) {
             skipped++;
             continue;
         }
@@ -168,16 +174,19 @@ export function compileSusy(dataset, rawCrafting = []) {
 
         for (const [output, entries] of [[false, recipe.inputs], [true, recipe.outputs]]) {
             for (const [idx, slot] of entries.entries()) {
-                const group = output ? null : slotGroup(slot);
-                const records = group ? group.members : [addGoods(slot)];
+                const { choices, aliases, label } = output ? { choices: [slot], aliases: [] } : resolveIngredient(slot, variants);
+                const group = output ? null : slotGroup(slot, choices, label);
+                const records = group ? group.members : [addGoods(choices[0] ?? slot)];
                 const type = ioType(slot, output, group);
                 const bucket = (output ? 2 : 0) + (slot.kind === "fluid" ? 1 : 0);
                 const sequence = counts[bucket]++;
                 const position = !output && recipe.craftingSlots ? recipe.craftingSlots[idx] : sequence;
                 const amount = slot.consumed === false && !output ? 0 : slot.amount;
+                const encodedAmount = supported(amount) ? amount : -bin.add(doubleWords(amount));
                 slots.push(type, group?.ptr ?? records[0].ptr, position < emptySlot ? position : emptySlot,
-                    amount, Math.round((slot.chance ?? 1) * 100));
+                    encodedAmount, Math.round((slot.chance ?? 1) * 10_000));
                 records.forEach(record => (output ? outputs : inputs).add(record));
+                aliases.forEach(alias => inputs.add(addGoods(alias)));
             }
         }
 
@@ -209,11 +218,12 @@ export function compileSusy(dataset, rawCrafting = []) {
     };
 }
 
-async function main(file, textureDir, rawFile) {
-    if (!file || !textureDir || !rawFile) throw new Error("Usage: node import-susy.mjs <recipes.json> <rendered-texture-directory> <recipedump.json>");
+async function main(file, textureDir, rawFile, instance) {
+    if (!file || !textureDir || !rawFile || !instance)
+        throw new Error("Usage: node import-susy.mjs <recipes.json> <rendered-texture-directory> <recipedump.json> <pack-instance>");
     const dataset = JSON.parse(await fs.readFile(file, "utf8"));
-    const { crafting } = JSON.parse(await fs.readFile(rawFile, "utf8"));
-    const { binary, icons, recipes, skipped } = compileSusy(dataset, crafting);
+    const raw = JSON.parse(await fs.readFile(rawFile, "utf8"));
+    const { binary, icons, recipes, skipped } = compileSusy(dataset, raw, await readPackLocales(instance));
 
     const dataDir = "public/data-susy", iconDir = "public/susy/icons";
     await fs.mkdir(dataDir, { recursive: true });
