@@ -919,3 +919,26 @@ body.shot .view { overflow: visible; }
 body.shot .cards { padding-bottom: 0; }
 body.shot .sicon { width: 32px; height: 32px; }
 body.shot { zoom: 2.1; } /* bigger cards in the tag screenshots */
+
+.pack-select {
+    font: inherit;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 5px 8px;
+}
+.topbar .seg[hidden] { display: none; }
+
+@media (max-width: 760px) {
+    .topbar { flex-wrap: wrap; padding: 10px 12px; }
+    .topbar .cmdbar { order: 1; flex-basis: 100%; max-width: none; }
+}
+
+@media (max-width: 540px) {
+    .logo-name { display: none; }
+    .topbar { gap: 6px; }
+    .topbar-actions { gap: 4px; }
+    .seg button { padding-inline: 6px; }
+}

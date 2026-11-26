@@ -1,4 +1,4 @@
-// NomiCodex — from-scratch frontend (2026). Built directly on the binary
+// GregTechCodex reads pack datasets from the binary
 // repository (repository.js) and the atlas; no classic-UI code involved.
 import { Repository, Item, Fluid, OreDict, Recipe } from "./repository.js?v=22";
 import { tierIndexOf } from "./utils.js?v=23";
@@ -12,6 +12,12 @@ let ATLAS_COLS = 128;
 let ATLAS_UNIT = 64;
 const SHOT = new URLSearchParams(location.hash.split("?")[1] ?? "").get("shot") === "1";
 const DATA_V = 16, ATLAS_V = 7, ICON_V = 1;
+const PACK = new URLSearchParams(location.search).get("pack") === "susy" ? "susy" : "nomi";
+const SUSY = PACK === "susy";
+const PACK_DESCRIPTION = SUSY ? "SuperSymmetry 0.2.0.4" : "NomiFactory CEu 1.7.7 — normal &amp; expert";
+const ASSET_ROOT = new URL("../", import.meta.url);
+const ICON_ROOT = new URL(SUSY ? "susy/icons" : "icons", ASSET_ROOT).href;
+const RECENT_KEY = SUSY ? "susy-recent" : "nomi-recent";
 // standalone per-item icon PNGs (the crisp re-rip); when loaded the
 // multi-MB atlas is skipped — null keeps the atlas fallback
 let ICONS_V2 = null;
@@ -42,7 +48,8 @@ function iconStyle(iconId, size = SHOT ? 32 : 36) {
     if (ICONS_V2 && ICONS_V2[iconId])
         // UNQUOTED url(): lands inside a style="..." attribute — quotes would
         // terminate the attribute and kill the style
-        return `background-image:url(icons/${ICONS_V2[iconId]}.png?v=${ICON_V});background-size:100% 100%`;
+        return `background-image:url(${ICON_ROOT}/${ICONS_V2[iconId]}.png?v=${ICON_V});background-size:100% 100%`;
+    if (SUSY) return "";
     const s = size / ATLAS_UNIT;
     const x = (iconId % ATLAS_COLS) * ATLAS_UNIT * s;
     const y = Math.floor(iconId / ATLAS_COLS) * ATLAS_UNIT * s;
@@ -298,6 +305,8 @@ function metaChips(r) {
             case "de_energy": case "xu2_energy": chips.push(`<span class="mchip"><b>${fmt(v)}</b> RF</span>`); break;
             case "de_tier": chips.push(`<span class="mchip tier">tier <b>${Math.round(v)}</b></span>`); break;
             case "cleanroom": if (v === 1) chips.push(`<span class="mchip">cleanroom</span>`); break;
+            case "programmed_circuit": chips.push(`<span class="mchip">circuit <b>${v}</b></span>`); break;
+            case "fusion_eu_to_start": chips.push(`<span class="mchip"><b>${fmt(v)}</b> EU to start</span>`); break;
             case "low_gravity": if (v === 1) chips.push(`<span class="mchip">low gravity</span>`); break;
             default: break;
         }
@@ -343,11 +352,11 @@ function recipeCard(r) {
 
 const view = () => $("#view");
 const recent = {
-    load: () => { try { return JSON.parse(localStorage.getItem("nomi-recent") ?? "[]"); } catch { return []; } },
+    load: () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]"); } catch { return []; } },
     push: (e) => {
         const list = recent.load().filter(x => x.id !== e.id);
         list.unshift({ id: e.id, plain: e.plain, nameHtml: e.nameHtml, iconId: e.iconId });
-        localStorage.setItem("nomi-recent", JSON.stringify(list.slice(0, 10)));
+        localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 10)));
     },
 };
 
@@ -359,8 +368,8 @@ function renderHome() {
     view().innerHTML = `
     <div class="wrap">
         <div class="hero">
-            <h1>Nomi<em>Codex</em></h1>
-            <p>Every recipe in NomiFactory CEu 1.7.7 — normal &amp; expert</p>
+            <h1>GregTech<em>Codex</em></h1>
+            <p>${PACK_DESCRIPTION}</p>
             <div class="hero-search">
                 <span class="search-ico">⌕</span>
                 <input id="hero-q" placeholder="Search ${INDEX.length.toLocaleString()} items and fluids…" autocomplete="off" spellcheck="false">
@@ -475,7 +484,7 @@ function renderItem(id) {
         }
         const r = lst[(state.r ?? 1) - 1];
         view().innerHTML = `<div class="wrap"><div class="cards single">${r ? recipeCard(r) : ""}</div></div>`;
-        document.title = (goods.name ?? goods.id) + " — NomiCodex";
+        document.title = (goods.name ?? goods.id) + " — GregTechCodex";
         bindGo(view());
         // card icons are individual PNGs — the shot service captures on the
         // ready flag, so every icon background must be decoded first
@@ -605,16 +614,25 @@ function route() {
 async function boot() {
     const splash = $("#splash .msg");
     const qp = new URLSearchParams(location.hash.split("?")[1] ?? "");
-    const mode = qp.get("mode") === "expert" || (!qp.has("mode") && localStorage.getItem("nomi-mode") === "expert") ? "expert" : "normal";
+    const pack = $("#pack");
+    pack.value = PACK;
+    pack.addEventListener("change", () => {
+        location.href = `${location.pathname}?pack=${pack.value}`;
+    });
+    $('.seg[title="Pack mode"]').hidden = SUSY;
+
+    const expert = qp.get("mode") === "expert" || (!qp.has("mode") && localStorage.getItem("nomi-mode") === "expert");
+    const mode = !SUSY && expert ? "expert" : "normal";
+    const dataset = SUSY ? "susy" : mode;
     document.querySelectorAll(".seg [data-mode]").forEach(b =>
         b.classList.toggle("on", b.dataset.mode === mode));
     if (SHOT) { ATLAS_COLS = 256; ATLAS_UNIT = 32; }
     try {
-        const r = await fetch(`./data-${mode}/icons-v2.json?v=${ICON_V}`);
+        const r = await fetch(new URL(`data-${dataset}/icons-v2.json?v=${ICON_V}`, ASSET_ROOT));
         if (r.ok) ICONS_V2 = await r.json();
     } catch (e) { ICONS_V2 = null; }
-    const needAtlas = !ICONS_V2 || ICONS_V2.some(x => !x);
-    const atlasUrl = new URL(`data-${mode}/${SHOT ? "atlas.webp" : "atlas2.webp"}?v=${ATLAS_V}`, document.baseURI).href;
+    const needAtlas = !SUSY && (!ICONS_V2 || ICONS_V2.some(x => !x));
+    const atlasUrl = new URL(`data-${dataset}/${SHOT ? "atlas.webp" : "atlas2.webp"}?v=${ATLAS_V}`, ASSET_ROOT).href;
     if (needAtlas)
         document.documentElement.style.setProperty("--atlas-url", `url("${atlasUrl}")`);
     if (SHOT) {
@@ -635,7 +653,7 @@ async function boot() {
     let response = null;
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            response = await fetch(`./data-${mode}/data.bin?v=${DATA_V}`);
+            response = await fetch(new URL(`data-${dataset}/data.bin?v=${DATA_V}`, ASSET_ROOT));
             if (response.ok) break;
         } catch (e) { /* retry */ }
         await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
@@ -699,7 +717,7 @@ async function boot() {
     // legacy deep links (?item=…)
     const legacy = new URL(location.href).searchParams.get("item");
     if (legacy) {
-        location.replace(location.pathname + "#/item/" + encodeURIComponent(legacy));
+        location.replace(location.pathname + (SUSY ? "?pack=susy" : "") + "#/item/" + encodeURIComponent(legacy));
         return;
     }
     window.addEventListener("hashchange", route);

@@ -1,10 +1,10 @@
 {
-  "name": "nomicodex-functions",
+  "name": "gregtechcodex-functions",
   "private": true,
   "type": "module",
   "scripts": {
     "build:worker": "npx --yes esbuild@0.24.0 worker/index.js --bundle --format=esm --target=es2022 --outfile=dist/worker.js",
-    "test": "node test-search.mjs"
+    "test": "node test-search.mjs && node --test test-import-susy.mjs"
   },
   "dependencies": {
     "@sparticuz/chromium": "^153.0.0",

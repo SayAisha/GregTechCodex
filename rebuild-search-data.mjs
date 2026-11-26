@@ -1,13 +1,16 @@
 // Rebuild search-data + api shards from the site's data.bin (the authoritative
 // source — includes every recipe variant the old build deduplicated away).
-// Usage: node rebuild-search-data.mjs <normal|expert>
+// Usage: node rebuild-search-data.mjs <normal|expert|susy>
 import fs from "node:fs";
 import zlib from "node:zlib";
 import { Repository, Goods, Recipe } from "./src/repository.js";
 import { writeWorkerData } from "./build-worker-data.mjs";
 
 const mode = process.argv[2] || "normal";
-const raw = zlib.gunzipSync(fs.readFileSync(`data-${mode}/data.bin`));
+if (!["normal", "expert", "susy"].includes(mode)) throw new Error(`Unknown dataset: ${mode}`);
+
+const dataPath = mode === "susy" ? "public/data-susy/data.bin" : `data-${mode}/data.bin`;
+const raw = zlib.gunzipSync(fs.readFileSync(dataPath));
 const repo = Repository.load(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
 // card-hash carryover source: the ORIGINAL dump-era data (names-only uses
 // summaries). `*.orig.json.gz` files are extracted once from the last
@@ -16,7 +19,7 @@ const repo = Repository.load(raw.buffer.slice(raw.byteOffset, raw.byteOffset + r
 const oldPath = fs.existsSync(`search-data/${mode}.orig.json.gz`)
     ? `search-data/${mode}.orig.json.gz`
     : `search-data/${mode}.json.gz`;
-const old = JSON.parse(zlib.gunzipSync(fs.readFileSync(oldPath)));
+const old = mode === "susy" ? { i: [], a: {}, recipes: {}, uses: {} } : JSON.parse(zlib.gunzipSync(fs.readFileSync(oldPath)));
 
 const TIERS = ["ULV","LV","MV","HV","EV","IV","LuV","ZPM","UV","UHV","UEV","UIV","UXV","OpV","MAX"];
 const TIER_MAX = [8,32,128,512,2048,8192,32768,131072,524288,2097152,8388608,33554432,134217728,536870912,2147483647];
@@ -61,9 +64,11 @@ function firstOutputName(r) {
 function recipeEntry(r, idx) {
     const gt = r.gtRecipe;
     let heat = 0, clean = false;
+    let circuit;
     if (gt) for (const m of gt.metadata) {
         if (m.key === "coil_heat") heat = Math.round(m.value);
         else if (m.key === "cleanroom") clean = true;
+        else if (m.key === "programmed_circuit") circuit = m.value;
     }
     return {
         idx,
@@ -73,6 +78,7 @@ function recipeEntry(r, idx) {
         amp: gt ? gt.amperage : 0,
         tier: gt ? tierOf(gt.voltage) : "ULV",
         heat, clean,
+        ...(circuit === undefined ? {} : { circuit }),
         img: "",
         ins: ioSummary(r, [0, 1, 2]),
         outs: ioSummary(r, [3, 4]),
@@ -92,7 +98,7 @@ function ioNames(r, kinds) {
     }
     return order.join(", ");
 }
-function useEntry(r, goods) {
+function useEntry(r, goods, idx) {
     const e = recipeEntry(r, 0);
     // amount of `goods` consumed: direct input, or via an oredict containing it
     let amount = 0;
@@ -102,6 +108,10 @@ function useEntry(r, goods) {
         if (io.type === 1 && io.goods.items?.some(it => it.id === goods.id)) { amount = io.amount; break; }
     }
     const entry = { n: firstOutputName(r), t: e.type, e: e.eu, d: e.dur, x: e.tier, h: e.heat, a: amount, i: e.ins, g: "" };
+    if (mode === "susy") {
+        entry.idx = idx;
+        if (e.circuit !== undefined) entry.circuit = e.circuit;
+    }
     entry.__key = JSON.stringify([entry.t, entry.e, entry.d, entry.n, ioNames(r, [0, 1, 2])]);
     return entry;
 }
@@ -122,11 +132,12 @@ for (const [uid, uses] of Object.entries(old.uses)) {
 }
 // --- walk every goods object (items + fluids) ---
 const recipes = {}, uses = {};
-const oldByName = new Map(old.i.map(x => [x[0], x]));
+const goodsIndex = [];
 let recipeCount = 0, useCount = 0, imgKept = 0, gKept = 0;
 const walk = goods => {
     const prod = [...goods.production], cons = [...goods.consumption];
     if (!prod.length && !cons.length) return;
+    if (mode === "susy") goodsIndex.push([goods.id, goods.name, goods.name, goods.mod]);
     if (prod.length) {
         const list = prod.map((ptr, i) => {
             const e = recipeEntry(repo.GetObject(ptr, Recipe), i);
@@ -140,8 +151,8 @@ const walk = goods => {
         recipeCount += list.length;
     }
     if (cons.length) {
-        const list = cons.map(ptr => {
-            const e = useEntry(repo.GetObject(ptr, Recipe), goods);
+        const list = cons.map((ptr, idx) => {
+            const e = useEntry(repo.GetObject(ptr, Recipe), goods, idx);
             e.g = oldG.get(e.__key) || "";
             if (e.g) gKept++;
             delete e.__key;
@@ -155,19 +166,21 @@ for (let i = 0; i < repo.items.length; i++) walk(repo.GetObject(repo.items[i], G
 for (let i = 0; i < repo.fluids.length; i++) walk(repo.GetObject(repo.fluids[i], Goods));
 
 // --- item index: keep identity fields from the old index, refresh counts/types ---
-const items = old.i.map(x => {
+const items = (mode === "susy" ? goodsIndex : old.i).map(x => {
     const rid = x[0];
     const prodTypes = [...new Set((recipes[rid] || []).map(r => r.type))];
     return [x[0], x[1], x[2], x[3], (recipes[rid] || []).length, (uses[rid] || []).length,
-        prodTypes.length ? prodTypes : x[6]];
+        prodTypes.length ? prodTypes : (x[6] ?? [])];
 });
 
 const out = { i: items, a: old.a, recipes, uses };
-fs.writeFileSync(`/tmp/rebuilt-${mode}.json`, JSON.stringify(out));
-
-// cleans the data, writes search-data/<mode>.json.gz and the worker files
-const { recipeFiles, useFiles } = writeWorkerData(mode, out);
-const nFiles = recipeFiles + useFiles;
+let nFiles = 0;
+if (mode === "susy") {
+    fs.writeFileSync(`search-data/${mode}.json.gz`, zlib.gzipSync(JSON.stringify(out), { level: 9 }));
+} else {
+    const { recipeFiles, useFiles } = writeWorkerData(mode, out);
+    nFiles = recipeFiles + useFiles;
+}
 
 const oldRC = Object.values(old.recipes).reduce((a, b) => a + b.length, 0);
 const oldUC = Object.values(old.uses).reduce((a, b) => a + b.length, 0);
